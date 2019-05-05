@@ -22,7 +22,6 @@
 #define WRITE 1
 
 typedef struct luaL_Spipe {
-  /* FILE* f; */
   int fdin, fdout;
   pid_t pid;
   lua_CFunction closef;
@@ -127,7 +126,6 @@ pipe_open (lua_State *L)
 {
   const char* cmd = lua_tostring(L,1);
   int inf = 0, outf = 0;
-  printf ("-> %s\n", cmd);
   int pid = popen2(cmd,&inf,&outf);
   LSpipe *file;
   if (pid == -1) {
