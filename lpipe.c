@@ -281,34 +281,6 @@ aux_read (lua_State *L, int mode, int do_poll)
   return 1;
 }
 
-/* static int io_readline (lua_State *L) { */
-/*   LSpipe *p = (LSpipe *)lua_touserdata(L, lua_upvalueindex(1)); */
-/*   int i; */
-/*   int n = (int)lua_tointeger(L, lua_upvalueindex(2)); */
-/*   if (isclosed(p))  /\* file is already closed? *\/ */
-/*     return luaL_error(L, "file is already closed"); */
-/*   lua_settop(L , 1); */
-/*   luaL_checkstack(L, n, "too many arguments"); */
-/*   for (i = 1; i <= n; i++)  /\* push arguments to 'g_read' *\/ */
-/*     lua_pushvalue(L, lua_upvalueindex(3 + i)); */
-/*   n = g_read(L, p->f, 2);  /\* 'n' is number of results *\/ */
-/*   lua_assert(n > 0);  /\* should return at least a nil *\/ */
-/*   if (lua_toboolean(L, -n))  /\* read at least one value? *\/ */
-/*     return n;  /\* return them *\/ */
-/*   else {  /\* first result is nil: EOF or error *\/ */
-/*     if (n > 1) {  /\* is there error information? *\/ */
-/*       /\* 2nd result is error message *\/ */
-/*       return luaL_error(L, "%s", lua_tostring(L, -n + 1)); */
-/*     } */
-/*     if (lua_toboolean(L, lua_upvalueindex(3))) {  /\* generator created file? *\/ */
-/*       lua_settop(L, 0); */
-/*       lua_pushvalue(L, lua_upvalueindex(1)); */
-/*       aux_close(L);  /\* close it *\/ */
-/*     } */
-/*     return 0; */
-/*   } */
-/* } */
-
 
 static inline LSpipe *
 newprepipe (lua_State *L) {
