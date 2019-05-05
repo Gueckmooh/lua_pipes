@@ -1,0 +1,19 @@
+#+OPTIONS: ':nil *:t -:t ::t <:t H:3 \n:nil ^:t arch:headline
+#+OPTIONS: author:t broken-links:nil c:nil creator:nil
+#+OPTIONS: d:(not "LOGBOOK") date:t e:t email:nil f:t inline:t num:t
+#+OPTIONS: p:nil pri:nil prop:nil stat:t tags:t tasks:t tex:t
+#+OPTIONS: timestamp:t title:t toc:t todo:t |:t
+#+TITLE: Pipes for Lua
+#+DATE: <2019-05-05 dim.>
+#+AUTHOR: Gueckmooh
+#+EMAIL: gueckmooh@pm.me
+#+LANGUAGE: en
+#+SELECT_TAGS: export
+#+EXCLUDE_TAGS: noexport
+#+CREATOR: Emacs 25.1.1 (Org mode 9.1.14)
+
+* Install
+  Works only with lua5.3 (for now)
+  #+begin_src bash
+    make
+  #+end_src
