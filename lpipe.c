@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <poll.h>
 #include <fcntl.h>
 
 #define LUA_PIPEHANDLE "PIPE*"
@@ -19,15 +20,23 @@
 #define isclosed(p)	((p)->closef == NULL)
 #endif
 
-#define READ  STDIN_FILENO
-#define WRITE STDOUT_FILENO
-#define ERR   STDERR_FILENO
+#define READ    STDIN_FILENO
+#define WRITE   STDOUT_FILENO
+#define ERR     STDERR_FILENO
+#define BUFSIZE 4096
+#define POLL    1
+#define NOPOLL  0
 
 typedef struct luaL_Spipe {
   int fdin, fdout, fderr;
   pid_t pid;
   lua_CFunction closef;
   int running;
+  char outbuffer[4096];
+  char errbuffer[4096];
+  int outb;
+  int errb;
+  int tryerr, tryout;
 } luaL_Spipe;
 
 #define LSpipe luaL_Spipe
@@ -104,18 +113,42 @@ aux_close (lua_State *L) {
   return (*cf)(L);  /* close it */
 }
 
-static int
-aux_read (lua_State *L, int mode) {
+static inline int
+aux_fillbuf (lua_State *L, int mode, int do_poll)
+{
   LSpipe *p = tolpipe(L);
-  static char buffer[4096];
+  /* static char buffer[4096]; */
   int count = 0;
+  int* pos;
+  char* buffer;
   switch (mode)
     {
     case READ:
-      count = read(p->fdout, buffer, 4096);
+      if (do_poll)
+        {
+          struct pollfd pp = { p->fdout, POLLIN, 0 };
+          int i;
+          if ((i = poll (&pp, 1, 10)) > 0)
+            count = read(p->fdout, p->outbuffer, BUFSIZE-1-p->outb);
+        }
+      else
+        count = read(p->fdout, p->outbuffer, BUFSIZE-1-p->outb);
+      p->outb += count;
+      pos = &p->outb;
+      buffer = p->outbuffer;
       break;
     case ERR:
-      count = read(p->fderr, buffer, 4096);
+      if (do_poll)
+        {
+          struct pollfd pp = { p->fderr, POLLIN, 0 };
+          if (poll (&pp, 1, 10) > 1)
+            count = read(p->fdout, p->outbuffer, BUFSIZE-1-p->outb);
+        }
+      else
+        count = read(p->fderr, p->errbuffer, BUFSIZE-1-p->outb);
+      p->errb += count;
+      pos = &p->errb;
+      buffer = p->errbuffer;
       break;
     default:
       lua_pushnil (L);
@@ -123,17 +156,155 @@ aux_read (lua_State *L, int mode) {
     }
   if(count < 0 && errno == EAGAIN) {
     /* There is nothing to read */
-    lua_pushnil (L);
-    return 1;
+    return 0;
   }
   else if(count >= 0) {
     /* We read count bytes */
-    buffer[count+1] = '\0';
-    lua_pushstring (L, buffer);
+    buffer[*pos] = '\0';
+    return 1;
   }
   else perror("read");
+  return 0;
+}
+
+static inline
+int read_all(lua_State *L, char* buffer, int* pos)
+{
+  lua_pushstring (L, (const char*) buffer);
+  *pos = 0;
   return 1;
 }
+
+static inline
+int read_line(lua_State *L, char* buffer, int* pos, int chop)
+{
+  char* str;
+  char* npos = strstr (buffer, "\n");
+  if (*pos == 0)
+    return 0;
+  if (npos != NULL)
+    {
+      long ll = npos - buffer;
+      if (ll != 0)
+        {
+          str = (char*) malloc (ll + 2);
+          strncpy(str, buffer, ll);
+          if (chop)
+            str[ll] = '\0';
+          else
+            {
+              str[ll] = '\n';
+              str[ll+1] = '\0';
+            }
+        }
+      else
+        {
+          str = (char*) malloc (2);
+          if (chop)
+            *str = '\0';
+          else
+            {
+              *str = '\n';
+              *(str + 1) = '\0';
+            }
+        }
+    }
+  else
+    {
+      return read_all (L, buffer, pos);
+    }
+  lua_pushstring (L, (const char*) str);
+  free (str);
+  *pos -= npos - buffer +1;
+  strcpy (buffer, npos + 1);
+  return 1;
+}
+
+static int
+aux_read (lua_State *L, int mode, int do_poll)
+{
+  LSpipe *p = tolpipe (L);
+  int *pos;
+  char* buffer;
+  int success = 0;
+  const char *s = NULL;
+  if (!lua_isnone(L, 2))  /* no argument? */
+      s = luaL_checkstring(L, 2);
+  switch (mode)
+    {
+    case READ:
+      pos = &p->outb;
+      buffer = p->outbuffer;
+      break;
+    case ERR:
+      pos = &p->errb;
+      buffer = p->errbuffer;
+      break;
+    default:
+      lua_pushnil (L);
+      return 1;
+      break;
+    }
+  if (aux_fillbuf(L, mode, do_poll))
+    {
+      if (s)
+        {
+          if (*s == '*') s++;  /* skip optional '*' (for compatibility) */
+          switch (*s) {
+            /* case 'n':  /\* number *\/ */
+            /*   success = read_number(L, f); */
+            /*   break; */
+            case 'l':  /* line */
+              success = read_line(L, buffer, pos, 1);
+              break;
+            case 'L':  /* line with end-of-line */
+              success = read_line(L, buffer, pos, 0);
+              break;
+          case 'a':  /* file */
+            success = read_all(L, buffer, pos);
+            break;
+          default:
+            return luaL_argerror(L, 2, "invalid format");
+          }
+        }
+      else success = read_all(L, buffer, pos);
+    }
+  if (!success)
+    {
+      lua_pop(L, 1);  /* remove last result */
+      lua_pushnil(L);  /* push nil instead */
+    }
+  return 1;
+}
+
+/* static int io_readline (lua_State *L) { */
+/*   LSpipe *p = (LSpipe *)lua_touserdata(L, lua_upvalueindex(1)); */
+/*   int i; */
+/*   int n = (int)lua_tointeger(L, lua_upvalueindex(2)); */
+/*   if (isclosed(p))  /\* file is already closed? *\/ */
+/*     return luaL_error(L, "file is already closed"); */
+/*   lua_settop(L , 1); */
+/*   luaL_checkstack(L, n, "too many arguments"); */
+/*   for (i = 1; i <= n; i++)  /\* push arguments to 'g_read' *\/ */
+/*     lua_pushvalue(L, lua_upvalueindex(3 + i)); */
+/*   n = g_read(L, p->f, 2);  /\* 'n' is number of results *\/ */
+/*   lua_assert(n > 0);  /\* should return at least a nil *\/ */
+/*   if (lua_toboolean(L, -n))  /\* read at least one value? *\/ */
+/*     return n;  /\* return them *\/ */
+/*   else {  /\* first result is nil: EOF or error *\/ */
+/*     if (n > 1) {  /\* is there error information? *\/ */
+/*       /\* 2nd result is error message *\/ */
+/*       return luaL_error(L, "%s", lua_tostring(L, -n + 1)); */
+/*     } */
+/*     if (lua_toboolean(L, lua_upvalueindex(3))) {  /\* generator created file? *\/ */
+/*       lua_settop(L, 0); */
+/*       lua_pushvalue(L, lua_upvalueindex(1)); */
+/*       aux_close(L);  /\* close it *\/ */
+/*     } */
+/*     return 0; */
+/*   } */
+/* } */
+
 
 static inline LSpipe *
 newprepipe (lua_State *L) {
@@ -167,6 +338,9 @@ newpipe (lua_State *L) {
   p->fdout = -1;
   p->fderr = -1;
   p->pid = 0;
+  p->running = 0;
+  p->outb = 0;
+  p->errb = 0;
   p->closef = &pipe_fclose;
   return p;
 }
@@ -177,7 +351,6 @@ pipe_open (lua_State *L)
   const char* cmd = lua_tostring(L,1);
   int inf = 0, outf = 0, errf = 0;
   int pid = popen2(cmd, &inf, &outf, &errf);
-  int flags;
   LSpipe *file;
   if (pid == -1) {
     lua_pushboolean(L,0);
@@ -189,10 +362,8 @@ pipe_open (lua_State *L)
     file->fderr = errf;
     file->pid = pid;
     file->running = 1;
-    flags = fcntl(outf, F_GETFL, 0);
-    if (fcntl(outf, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");;
-    flags = fcntl(errf, F_GETFL, 0);
-    if (fcntl(errf, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");
+    file->tryerr = 0;
+    file->tryout = 0;
     return 1;
   }
 }
@@ -228,8 +399,26 @@ p_close (lua_State *L) {
 
 static int
 p_read (lua_State *L) {
-  topipe(L);
-  return aux_read (L, READ);
+  LSpipe *p = topipe(L);
+  if (p->tryout)
+    {
+      int flags = fcntl(p->fdout, F_GETFL, 0);
+      if (fcntl(p->fdout, F_SETFL, flags & (~O_NONBLOCK))) perror("fcntl");
+      p->tryout = 1;
+    }
+  return aux_read (L, READ, POLL);
+}
+
+static int
+p_try_read (lua_State *L) {
+  LSpipe *p = topipe(L);
+  if (!p->tryout)
+    {
+      int flags = fcntl(p->fdout, F_GETFL, 0);
+      if (fcntl(p->fdout, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");
+      p->tryout = 1;
+    }
+  return aux_read (L, READ, NOPOLL);
 }
 
 static int
@@ -241,8 +430,26 @@ p_is_running (lua_State *L)
 
 static int
 p_read_err (lua_State *L) {
-  topipe(L);
-  return aux_read (L, ERR);
+  LSpipe *p = topipe(L);
+  if (p->tryout)
+    {
+      int flags = fcntl(p->fderr, F_GETFL, 0);
+      if (fcntl(p->fderr, F_SETFL, flags & (~O_NONBLOCK))) perror("fcntl");
+      p->tryout = 1;
+    }
+  return aux_read (L, ERR, POLL);
+}
+
+static int
+p_try_read_err (lua_State *L) {
+  LSpipe *p = topipe(L);
+  if (!p->tryout)
+    {
+      int flags = fcntl(p->fderr, F_GETFL, 0);
+      if (fcntl(p->fderr, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");
+      p->tryout = 1;
+    }
+  return aux_read (L, ERR, NOPOLL);
 }
 
 static int
@@ -253,6 +460,15 @@ p_write (lua_State *L) {
   const char* cmd = lua_tostring(L,2);
   lua_pushnil(L);
   write (p->fdin, cmd, strlen(cmd));
+  return 1;
+}
+
+static int
+p_flush (lua_State *L)
+{
+  LSpipe *p = topipe(L);
+  fsync (p->fdin);
+  lua_pushnil (L);
   return 1;
 }
 
@@ -268,8 +484,11 @@ static int p_gc (lua_State *L) {
 static const luaL_Reg pipelib[] = {
   {"close", pipe_close},
   {"read", p_read},
+  {"try_read", p_try_read},
   {"read_err", p_read_err},
+  {"try_read_err", p_try_read_err},
   {"write", p_write},
+  {"flush", p_flush},
   {"is_running", p_is_running},
   {"open", pipe_open},
   {NULL, NULL}
@@ -279,8 +498,11 @@ static const luaL_Reg pipelib[] = {
 static const luaL_Reg plib[] = {
   {"close", p_close},
   {"read", p_read},
+  {"try_read", p_try_read},
   {"read_err", p_read_err},
+  {"try_read_err", p_try_read_err},
   {"write", p_write},
+  {"flush", p_flush},
   {"is_running", p_is_running},
   {"__gc", p_gc},
   {NULL, NULL}
