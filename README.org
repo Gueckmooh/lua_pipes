@@ -13,9 +13,12 @@
 #+CREATOR: Emacs 25.1.1 (Org mode 9.1.14)
 
 * Install
-  Works only with lua5.3 (for now)
+  Works only with lua5.3 and lua5.2 (for now)
   #+begin_src bash
     make
+    # or
+    make lua5-3 # for lua5.3 (default target)
+    make lua5-2 # for lua5.2
   #+end_src
 
 * Example
