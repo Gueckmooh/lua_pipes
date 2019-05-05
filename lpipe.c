@@ -161,12 +161,11 @@ p_close (lua_State *L) {
 static int
 p_read (lua_State *L) {
   LSpipe *p = tolpipe(L);
-  static char cmd[4096];
+  static char str[4096];
   int pos = 0;
-  lua_pushnil(L);
-  pos = read (p->fdout, cmd+pos, 4096);
-  cmd[pos+1] = '\0';
-  printf ("read: %s\n", cmd);
+  pos = read (p->fdout, str+pos, 4096);
+  str[pos+1] = '\0';
+  lua_pushstring (L, str);
   return 1;
 }
 
@@ -175,7 +174,6 @@ p_write (lua_State *L) {
   LSpipe *p = tolpipe(L);
   const char* cmd = lua_tostring(L,2);
   lua_pushnil(L);
-  printf ("write: %s\n", cmd);
   write (p->fdin, cmd, strlen(cmd));
   return 1;
 }
@@ -188,9 +186,6 @@ static int p_gc (lua_State *L) {
 }
 
 /* END OF THE PIPE METATABLE */
-
-
-
 
 static const luaL_Reg pipelib[] = {
   {"close", pipe_close},
