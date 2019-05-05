@@ -28,5 +28,7 @@
     local p = pipe.open ("pacmd")
     p:write ("dump\n")
     local res = p:read ()
+    local res_err = p:read_err ()
     print (res)
+    print (res_err)
   #+end_src

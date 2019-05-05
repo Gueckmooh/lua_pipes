@@ -11,6 +11,7 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 #define LUA_PIPEHANDLE "PIPE*"
 
@@ -18,11 +19,12 @@
 #define isclosed(p)	((p)->closef == NULL)
 #endif
 
-#define READ 0
-#define WRITE 1
+#define READ  STDIN_FILENO
+#define WRITE STDOUT_FILENO
+#define ERR   STDERR_FILENO
 
 typedef struct luaL_Spipe {
-  int fdin, fdout;
+  int fdin, fdout, fderr;
   pid_t pid;
   lua_CFunction closef;
 } luaL_Spipe;
@@ -32,12 +34,12 @@ typedef struct luaL_Spipe {
 #define tolpipe(L)    ((luaL_Spipe *)luaL_checkudata(L, 1, LUA_PIPEHANDLE))
 
 static inline pid_t
-popen2(const char *command, int *infp, int *outfp)
+popen2(const char *command, int *infp, int *outfp, int *errfp)
 {
-  int p_stdin[2], p_stdout[2];
+  int p_stdin[2], p_stdout[2], p_stderr[2];
   pid_t pid;
 
-  if (pipe(p_stdin) != 0 || pipe(p_stdout) != 0)
+  if (pipe(p_stdin) != 0 || pipe(p_stdout) != 0 || pipe(p_stderr) != 0)
     return -1;
 
   pid = fork();
@@ -48,8 +50,12 @@ popen2(const char *command, int *infp, int *outfp)
     {
       close(p_stdin[WRITE]);
       dup2(p_stdin[READ], READ);
+
       close(p_stdout[READ]);
       dup2(p_stdout[WRITE], WRITE);
+
+      close(p_stderr[READ]);
+      dup2(p_stderr[WRITE], ERR);
 
       execl("/bin/sh", "sh", "-c", command, NULL);
       // if we get here, then something's wrong!
@@ -72,6 +78,13 @@ popen2(const char *command, int *infp, int *outfp)
     *outfp = p_stdout[READ];
   }
 
+  if (errfp == NULL)
+    close(p_stderr[READ]);
+  else {
+    close(p_stderr[WRITE]);
+    *errfp = p_stderr[READ];
+  }
+
   return pid;
 }
 
@@ -90,6 +103,37 @@ aux_close (lua_State *L) {
   return (*cf)(L);  /* close it */
 }
 
+static int
+aux_read (lua_State *L, int mode) {
+  LSpipe *p = tolpipe(L);
+  static char buffer[4096];
+  int count = 0;
+  switch (mode)
+    {
+    case READ:
+      count = read(p->fdout, buffer, 1024);
+      break;
+    case ERR:
+      count = read(p->fderr, buffer, 1024);
+      break;
+    default:
+      lua_pushnil (L);
+      return 1;
+    }
+  if(count < 0 && errno == EAGAIN) {
+    /* There is nothing to read */
+    lua_pushnil (L);
+    return 1;
+  }
+  else if(count >= 0) {
+    /* We read count bytes */
+    buffer[count+1] = '\0';
+    lua_pushstring (L, buffer);
+  }
+  else perror("read");
+  return 1;
+}
+
 static inline LSpipe *
 newprepipe (lua_State *L) {
   LSpipe *p = (LSpipe *)lua_newuserdata(L, sizeof(LSpipe));
@@ -104,6 +148,7 @@ pipe_fclose (lua_State *L)
   LSpipe *p = tolpipe(L);
   close (p->fdin);
   close (p->fdout);
+  close (p->fderr);
 
   kill (p->pid, SIGINT);
   waitpid (p->pid, NULL, 0);
@@ -116,6 +161,7 @@ newpipe (lua_State *L) {
   LSpipe *p = newprepipe(L);
   p->fdin = -1;
   p->fdout = -1;
+  p->fderr = -1;
   p->pid = 0;
   p->closef = &pipe_fclose;
   return p;
@@ -125,8 +171,9 @@ static int
 pipe_open (lua_State *L)
 {
   const char* cmd = lua_tostring(L,1);
-  int inf = 0, outf = 0;
-  int pid = popen2(cmd,&inf,&outf);
+  int inf = 0, outf = 0, errf = 0;
+  int pid = popen2(cmd, &inf, &outf, &errf);
+  int flags;
   LSpipe *file;
   if (pid == -1) {
     lua_pushboolean(L,0);
@@ -135,7 +182,12 @@ pipe_open (lua_State *L)
     file = newpipe (L);
     file->fdin = inf;
     file->fdout = outf;
+    file->fderr = errf;
     file->pid = pid;
+    flags = fcntl(outf, F_GETFL, 0);
+    if (fcntl(outf, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");;
+    flags = fcntl(errf, F_GETFL, 0);
+    if (fcntl(errf, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");
     return 1;
   }
 }
@@ -158,13 +210,14 @@ p_close (lua_State *L) {
 
 static int
 p_read (lua_State *L) {
-  LSpipe *p = tolpipe(L);
-  static char str[4096];
-  int pos = 0;
-  pos = read (p->fdout, str+pos, 4096);
-  str[pos+1] = '\0';
-  lua_pushstring (L, str);
-  return 1;
+  topipe(L);
+  return aux_read (L, READ);
+}
+
+static int
+p_read_err (lua_State *L) {
+  topipe(L);
+  return aux_read (L, ERR);
 }
 
 static int
@@ -188,6 +241,7 @@ static int p_gc (lua_State *L) {
 static const luaL_Reg pipelib[] = {
   {"close", pipe_close},
   {"read", p_read},
+  {"read_err", p_read_err},
   {"write", p_write},
   {"open", pipe_open},
   {NULL, NULL}
@@ -197,6 +251,7 @@ static const luaL_Reg pipelib[] = {
 static const luaL_Reg plib[] = {
   {"close", p_close},
   {"read", p_read},
+  {"read_err", p_read_err},
   {"write", p_write},
   {"__gc", p_gc},
   {NULL, NULL}
