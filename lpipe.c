@@ -130,6 +130,8 @@ aux_fillbuf (lua_State *L, int mode, int do_poll)
           int i;
           if ((i = poll (&pp, 1, 10)) > 0)
             count = read(p->fdout, p->outbuffer, BUFSIZE-1-p->outb);
+          else
+            return 0;
         }
       else
         count = read(p->fdout, p->outbuffer, BUFSIZE-1-p->outb);
@@ -143,6 +145,8 @@ aux_fillbuf (lua_State *L, int mode, int do_poll)
           struct pollfd pp = { p->fderr, POLLIN, 0 };
           if (poll (&pp, 1, 10) > 1)
             count = read(p->fdout, p->outbuffer, BUFSIZE-1-p->outb);
+          else
+            return 0;
         }
       else
         count = read(p->fderr, p->errbuffer, BUFSIZE-1-p->outb);
@@ -481,6 +485,57 @@ static int p_gc (lua_State *L) {
 
 /* END OF THE PIPE METATABLE */
 
+int
+pipe_readlines (lua_State *L)
+{
+  LSpipe *p = ((luaL_Spipe *)luaL_checkudata(L, lua_upvalueindex(1),
+                                             LUA_PIPEHANDLE));
+  int* pos = &p->outb;
+  char* buffer = p->outbuffer;
+  int success = read_line(L, buffer, pos, 1);
+  if (!success)
+    {
+      lua_pop(L, 1);  /* remove last result */
+      lua_pushnil(L);  /* push nil instead */
+    }
+  return 1;
+}
+
+int
+p_lines (lua_State *L)
+{
+  topipe (L);
+  aux_fillbuf(L,  READ, POLL);
+  lua_pushcclosure (L, pipe_readlines, 1);
+  return 1;
+}
+
+int
+pipe_readlines_err (lua_State *L)
+{
+  LSpipe *p = ((luaL_Spipe *)luaL_checkudata(L, lua_upvalueindex(1),
+                                             LUA_PIPEHANDLE));
+  int* pos = &p->errb;
+  char* buffer = p->errbuffer;
+  int success = read_line(L, buffer, pos, 1);
+  if (!success)
+    {
+      lua_pop(L, 1);  /* remove last result */
+      lua_pushnil(L);  /* push nil instead */
+    }
+  return 1;
+}
+
+int
+p_lines_err (lua_State *L)
+{
+  topipe (L);
+  aux_fillbuf(L, ERR, POLL);
+  lua_pushcclosure (L, pipe_readlines_err, 1);
+  return 1;
+}
+
+
 static const luaL_Reg pipelib[] = {
   {"close", pipe_close},
   {"read", p_read},
@@ -491,6 +546,8 @@ static const luaL_Reg pipelib[] = {
   {"flush", p_flush},
   {"is_running", p_is_running},
   {"open", pipe_open},
+  {"lines", p_lines},
+  {"lines_err", p_lines_err},
   {NULL, NULL}
 };
 
@@ -504,6 +561,8 @@ static const luaL_Reg plib[] = {
   {"write", p_write},
   {"flush", p_flush},
   {"is_running", p_is_running},
+  {"lines", p_lines},
+  {"lines_err", p_lines_err},
   {"__gc", p_gc},
   {NULL, NULL}
 };
