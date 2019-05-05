@@ -27,6 +27,7 @@ typedef struct luaL_Spipe {
   int fdin, fdout, fderr;
   pid_t pid;
   lua_CFunction closef;
+  int running;
 } luaL_Spipe;
 
 #define LSpipe luaL_Spipe
@@ -111,10 +112,10 @@ aux_read (lua_State *L, int mode) {
   switch (mode)
     {
     case READ:
-      count = read(p->fdout, buffer, 1024);
+      count = read(p->fdout, buffer, 4096);
       break;
     case ERR:
-      count = read(p->fderr, buffer, 1024);
+      count = read(p->fderr, buffer, 4096);
       break;
     default:
       lua_pushnil (L);
@@ -150,8 +151,11 @@ pipe_fclose (lua_State *L)
   close (p->fdout);
   close (p->fderr);
 
-  kill (p->pid, SIGINT);
-  waitpid (p->pid, NULL, 0);
+  if (p->running)
+    {
+      kill (p->pid, SIGINT);
+      waitpid (p->pid, NULL, 0);
+    }
 
   return 0;
 }
@@ -184,6 +188,7 @@ pipe_open (lua_State *L)
     file->fdout = outf;
     file->fderr = errf;
     file->pid = pid;
+    file->running = 1;
     flags = fcntl(outf, F_GETFL, 0);
     if (fcntl(outf, F_SETFL, flags | O_NONBLOCK)) perror("fcntl");;
     flags = fcntl(errf, F_GETFL, 0);
@@ -195,11 +200,24 @@ pipe_open (lua_State *L)
 static LSpipe* topipe (lua_State *L) {
   LSpipe *p = tolpipe(L);
   if (isclosed(p))
-    luaL_error(L, "attempt to use a closed file");
+    luaL_error(L, "attempt to use a closed pipe");
   lua_assert(p->f);
   return p;
 }
 
+static int
+pipe_is_running (lua_State *L)
+{
+  LSpipe *p = tolpipe (L);
+  if (p->running)
+    {
+      pid_t res = waitpid(p->pid, NULL, WNOHANG);
+      if (res > 0)
+        p->running = 0;
+    }
+  lua_pushboolean (L, p->running);
+  return 1;
+}
 
 /* BEGINING OF THE PIPE METATABLE */
 static int
@@ -215,6 +233,13 @@ p_read (lua_State *L) {
 }
 
 static int
+p_is_running (lua_State *L)
+{
+  topipe(L);
+  return pipe_is_running(L);
+}
+
+static int
 p_read_err (lua_State *L) {
   topipe(L);
   return aux_read (L, ERR);
@@ -222,7 +247,9 @@ p_read_err (lua_State *L) {
 
 static int
 p_write (lua_State *L) {
-  LSpipe *p = tolpipe(L);
+  LSpipe *p = topipe(L);
+  if (lua_isnone(L, 2))  /* no argument? */
+    luaL_error(L, "need a string to write");
   const char* cmd = lua_tostring(L,2);
   lua_pushnil(L);
   write (p->fdin, cmd, strlen(cmd));
@@ -243,6 +270,7 @@ static const luaL_Reg pipelib[] = {
   {"read", p_read},
   {"read_err", p_read_err},
   {"write", p_write},
+  {"is_running", p_is_running},
   {"open", pipe_open},
   {NULL, NULL}
 };
@@ -253,6 +281,7 @@ static const luaL_Reg plib[] = {
   {"read", p_read},
   {"read_err", p_read_err},
   {"write", p_write},
+  {"is_running", p_is_running},
   {"__gc", p_gc},
   {NULL, NULL}
 };
