@@ -37,11 +37,14 @@ typedef struct luaL_Spipe {
   int outb;
   int errb;
   int tryerr, tryout;
+  struct luaL_Spipe** catt;
+  int ncatt;
 } luaL_Spipe;
 
 #define LSpipe luaL_Spipe
 
 #define tolpipe(L)    ((luaL_Spipe *)luaL_checkudata(L, 1, LUA_PIPEHANDLE))
+#define tolpipen(L,n) ((luaL_Spipe *)luaL_checkudata(L, n, LUA_PIPEHANDLE))
 
 static inline pid_t
 popen2(const char *command, int *infp, int *outfp, int *errfp)
@@ -95,6 +98,24 @@ popen2(const char *command, int *infp, int *outfp, int *errfp)
     *errfp = p_stderr[READ];
   }
 
+  return pid;
+}
+
+pid_t
+aux_pipe (LSpipe* p1, LSpipe* p2)
+{
+  pid_t pid;
+  pid = fork ();
+
+  if (pid == 0)                 /* Child */
+    {
+      dup2 (p1->fdout, READ);
+      dup2 (p2->fdin, WRITE);
+
+      execl("/bin/sh", "sh", "-c", "cat", NULL);
+      perror("execl");
+      exit (1);
+    }
   return pid;
 }
 
@@ -294,6 +315,7 @@ int
 pipe_fclose (lua_State *L)
 {
   LSpipe *p = tolpipe(L);
+
   close (p->fdin);
   close (p->fdout);
   close (p->fderr);
@@ -301,10 +323,30 @@ pipe_fclose (lua_State *L)
   if (p->running)
     {
       kill (p->pid, SIGINT);
-      waitpid (p->pid, NULL, 0);
+      waitpid (p->pid, NULL, WNOHANG);
     }
 
   return 0;
+}
+
+int
+pipe_fclose_read (lua_State *L)
+{
+  LSpipe *p = tolpipe(L);
+
+  close (p->fdin);
+  close (p->fderr);
+
+  if (p->running)
+    {
+      kill (p->pid, SIGINT);
+      waitpid (p->pid, NULL, WNOHANG);
+    }
+
+  read_all(L,p->outbuffer,&p->outb);
+  close (p->fdout);
+
+  return 1;
 }
 
 static inline LSpipe *
@@ -340,8 +382,43 @@ pipe_open (lua_State *L)
     file->running = 1;
     file->tryerr = 0;
     file->tryout = 0;
+    file->catt = NULL;
+    file->ncatt = 0;
     return 1;
   }
+}
+
+static int
+pipe_pipe (lua_State *L)
+{
+  LSpipe* p1 = tolpipen(L,1);
+  LSpipe* p2 = tolpipen(L,2);
+  LSpipe* file;
+  pid_t pid = aux_pipe (p1, p2);
+  file = newpipe (L);
+  file->fdin = p1->fdin;
+  file->fdout = p2->fdout;
+  file->fderr = p2->fderr;
+  file->pid = pid;
+  file->running = 1;
+  file->tryerr = 0;
+  file->tryout = 0;
+  if (p1->ncatt == 0)
+    {
+      file->catt = malloc (sizeof (LSpipe*) * 2);
+      file->catt[0] = p1;
+      file->catt[1] = p2;
+      file->ncatt = 2;
+    }
+  else
+    {
+      file->catt = malloc (sizeof (LSpipe*) * (p1->ncatt + 1));
+      for (int i = 0; i <= p1->ncatt; i++)
+        file->catt[i] = p1->catt[i];
+      file->catt[p1->ncatt] = p2;
+      file->ncatt = p1->ncatt+1;
+    }
+  return 1;
 }
 
 static LSpipe* topipe (lua_State *L) {
@@ -520,6 +597,7 @@ static const luaL_Reg pipelib[] = {
   {"open", pipe_open},
   {"lines", p_lines},
   {"lines_err", p_lines_err},
+  {"pipe", pipe_pipe},
   {NULL, NULL}
 };
 
@@ -535,6 +613,7 @@ static const luaL_Reg plib[] = {
   {"is_running", p_is_running},
   {"lines", p_lines},
   {"lines_err", p_lines_err},
+  {"__add", pipe_pipe},
   {"__gc", p_gc},
   {NULL, NULL}
 };
