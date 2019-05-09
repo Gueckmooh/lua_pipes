@@ -109,12 +109,19 @@ aux_pipe (LSpipe* p1, LSpipe* p2)
 
   if (pid == 0)                 /* Child */
     {
+      char buffer[256];
       dup2 (p1->fdout, READ);
       dup2 (p2->fdin, WRITE);
 
-      execl("/bin/sh", "sh", "-c", "cat", NULL);
-      perror("execl");
-      exit (1);
+      for (;;)
+        {
+          int count = read (STDIN_FILENO, buffer, 256);
+          write (STDOUT_FILENO, buffer, count);
+        }
+
+      /* execl("/bin/sh", "sh", "-c", "cat", NULL); */
+      /* perror("execl"); */
+      /* exit (1); */
     }
   return pid;
 }
